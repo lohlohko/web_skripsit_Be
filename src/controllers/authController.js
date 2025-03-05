@@ -1,25 +1,25 @@
-const { validateUser, verifyPassword, hashPassword } = require("../utils/auth");
-const pool = require("../config/database");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
+const pool = require("../config/database");
 
-// Tambahkan fungsi register
+// Fungsi register menerima password yang sudah di-hash dari client
 exports.register = async (req, res) => {
   let connection;
   try {
-    // Sesuaikan dengan nama field yang dikirim dari client
-    const { name, email, hashed_password, encrypted_aes_key } = req.body;
+    // 1. Terima data yang sudah di-hash dari client
+    const { name, email, hashed_password } = req.body;
 
-    // Validasi input
-    if (!email || !hashed_password || !encrypted_aes_key || !name) {
+    // 2. Validasi input
+    if (!email || !hashed_password || !name) {
       return res.status(400).json({
         success: false,
-        message: "Email, password, encrypted key, and name are required",
+        message: "Email, password, and name are required",
       });
     }
 
     connection = await pool.getConnection();
 
+    // 3. Cek email duplikat
     const [existingUser] = await connection.execute(
       "SELECT * FROM users WHERE email = ?",
       [email]
@@ -32,10 +32,10 @@ exports.register = async (req, res) => {
       });
     }
 
-    // Simpan ke database dengan nama field yang sesuai
+    // 4. Simpan ke database (password sudah dalam bentuk hash)
     const [result] = await connection.query(
-      "INSERT INTO users (name, email, hashed_password, encrypted_aes_key, role, status) VALUES (?, ?, ?, ?, ?, ?)",
-      [name, email, hashed_password, encrypted_aes_key, "user", "pending"]
+      "INSERT INTO users (name, email, hashed_password, role, status) VALUES (?, ?, ?, ?, ?)",
+      [name, email, hashed_password, "user", "pending"]
     );
 
     return res.status(201).json({
@@ -48,7 +48,7 @@ exports.register = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Terjadi kesalahan saat registrasi",
-      error: error.message, // Tambahkan ini untuk debugging
+      error: error.message,
     });
   } finally {
     if (connection) connection.release();
@@ -71,7 +71,7 @@ exports.login = async (req, res) => {
 
     // Get user by email
     const [users] = await connection.execute(
-      "SELECT id, name, email, role, hashed_password, encrypted_aes_key FROM users WHERE email = ?",
+      "SELECT id, name, email, role, hashed_password FROM users WHERE email = ?",
       [email]
     );
 
@@ -92,12 +92,21 @@ exports.login = async (req, res) => {
       });
     }
 
+    // Generate new public key
+    const publicKey = crypto.randomBytes(32).toString("hex");
+
+    // Update public key di database
+    await connection.query(
+      `UPDATE users 
+       SET public_key = ?, 
+           key_expires_at = DATE_ADD(NOW(), INTERVAL 24 HOUR) 
+       WHERE id = ?`,
+      [publicKey, user.id]
+    );
+
     // Create JWT token
     const token = jwt.sign(
-      {
-        id: user.id,
-        role: user.role,
-      },
+      { id: user.id, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: "24h" }
     );
@@ -110,7 +119,7 @@ exports.login = async (req, res) => {
       maxAge: 24 * 60 * 60 * 1000, // 24 hours
     });
 
-    // Send response
+    // Send response dengan public key
     return res.json({
       success: true,
       message: "Login successful",
@@ -118,7 +127,7 @@ exports.login = async (req, res) => {
         name: user.name,
         role: user.role,
       },
-      encrypted_aes_key: user.encrypted_aes_key, // Kirim AES key yang terenkripsi
+      publicKey: publicKey, // Kirim public key untuk enkripsi data
     });
   } catch (error) {
     console.error("Login error:", error);
