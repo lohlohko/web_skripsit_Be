@@ -39,62 +39,39 @@ exports.completeProfile = async (req, res) => {
     const { fullName, nik, phone, address } = req.body;
     const userId = req.user.id;
 
-    // Ambil hash password user dari database untuk enkripsi
-    const [user] = await pool.query(
-      "SELECT hashed_password FROM users WHERE id = ?",
-      [userId]
-    );
-
-    if (!user || !user[0]) {
-      throw new Error("User not found");
-    }
-
-    // Gunakan hash password sebagai key AES
-    const encryptionKey = Buffer.from(user[0].hashed_password, "hex");
-
     connection = await pool.getConnection();
 
-    // Enkripsi data sensitif
-    const encryptedNik = encrypt(nik, encryptionKey);
-    const encryptedPhone = encrypt(phone, encryptionKey);
-    const encryptedAddress = encrypt(address, encryptionKey);
-    const encryptedFullName = encrypt(fullName, encryptionKey);
-
-    // Update user_details
-    await connection.execute(
+    // 1. Simpan data terenkripsi ke tabel user_details
+    await connection.query(
       `INSERT INTO user_details 
-        (user_id, encrypted_fullname, encrypted_nik, encrypted_phone, encrypted_address, is_verified) 
-      VALUES (?, ?, ?, ?, ?, true)
-      ON DUPLICATE KEY UPDATE 
+        (user_id, encrypted_fullname, encrypted_phone, encrypted_address, encrypted_nik, is_verified) 
+       VALUES (?, ?, ?, ?, ?, 1)
+       ON DUPLICATE KEY UPDATE 
         encrypted_fullname = VALUES(encrypted_fullname),
-        encrypted_nik = VALUES(encrypted_nik),
         encrypted_phone = VALUES(encrypted_phone),
         encrypted_address = VALUES(encrypted_address),
-        is_verified = true`,
-      [
-        userId,
-        encryptedFullName,
-        encryptedNik,
-        encryptedPhone,
-        encryptedAddress,
-      ]
+        encrypted_nik = VALUES(encrypted_nik),
+        is_verified = 1`,
+      [userId, fullName, phone, address, nik]
     );
 
-    // Update status user
-    await connection.execute(
-      "UPDATE users SET status = 'verified' WHERE id = ?",
+    // 2. Update status di tabel users
+    await connection.query(
+      `UPDATE users SET 
+        status = 'verified'
+       WHERE id = ?`,
       [userId]
     );
 
-    res.json({
+    return res.json({
       success: true,
       message: "Profile updated successfully",
     });
   } catch (error) {
-    console.error("Error completing profile:", error);
-    res.status(500).json({
+    console.error("Error updating profile:", error);
+    return res.status(500).json({
       success: false,
-      error: "Failed to update profile",
+      message: "Failed to update profile",
     });
   } finally {
     if (connection) connection.release();
@@ -106,9 +83,9 @@ exports.getProfile = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // Ambil data user dan hash password
+    // Ambil data user termasuk encrypted_aes_key
     const [user] = await pool.query(
-      `SELECT u.hashed_password, u.email, ud.* 
+      `SELECT u.email, u.encrypted_aes_key, ud.* 
        FROM users u 
        LEFT JOIN user_details ud ON u.id = ud.user_id 
        WHERE u.id = ?`,
@@ -122,31 +99,16 @@ exports.getProfile = async (req, res) => {
       });
     }
 
-    // Gunakan hash password sebagai key untuk dekripsi
-    const encryptionKey = Buffer.from(user[0].hashed_password, "hex");
-
-    // Dekripsi data sensitif
-    const decryptedData = {
-      fullName: user[0].encrypted_fullname
-        ? decrypt(user[0].encrypted_fullname, encryptionKey)
-        : null,
-      nik: user[0].encrypted_nik
-        ? decrypt(user[0].encrypted_nik, encryptionKey)
-        : null,
-      phone: user[0].encrypted_phone
-        ? decrypt(user[0].encrypted_phone, encryptionKey)
-        : null,
-      address: user[0].encrypted_address
-        ? decrypt(user[0].encrypted_address, encryptionKey)
-        : null,
-    };
-
+    // Kirim data terenkripsi ke client
     res.json({
       success: true,
       user: {
         email: user[0].email,
-        ...decryptedData,
-        isVerified: user[0].is_verified,
+        encrypted_fullname: user[0].encrypted_fullname || null,
+        encrypted_nik: user[0].encrypted_nik || null,
+        encrypted_phone: user[0].encrypted_phone || null,
+        encrypted_address: user[0].encrypted_address || null,
+        isVerified: user[0].is_verified === 1,
       },
     });
   } catch (error) {
@@ -161,14 +123,27 @@ exports.getProfile = async (req, res) => {
 };
 
 exports.checkVerificationStatus = async (req, res) => {
+  let connection;
   try {
-    const [user] = await pool.query("SELECT status FROM users WHERE id = ?", [
-      req.user.id,
-    ]);
+    connection = await pool.getConnection();
+
+    // Check both users and user_details tables
+    const [result] = await connection.query(
+      `SELECT u.status, ud.is_verified 
+       FROM users u 
+       LEFT JOIN user_details ud ON u.id = ud.user_id 
+       WHERE u.id = ?`,
+      [req.user.id]
+    );
+
+    // User dianggap terverifikasi jika status di users = 'verified'
+    // DAN is_verified di user_details = 1
+    const isVerified =
+      result[0]?.status === "verified" && result[0]?.is_verified === 1;
 
     res.json({
       success: true,
-      status: user[0]?.status || "unverified",
+      status: isVerified ? "verified" : "pending",
     });
   } catch (error) {
     console.error("Error checking verification status:", error);
@@ -176,5 +151,7 @@ exports.checkVerificationStatus = async (req, res) => {
       success: false,
       error: "Failed to check verification status",
     });
+  } finally {
+    if (connection) connection.release();
   }
 };

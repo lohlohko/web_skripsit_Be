@@ -4,7 +4,7 @@ const { getAESKey } = require("../utils/auth");
 const adminController = {
   getUsers: async (req, res) => {
     try {
-      // Tambahkan DISTINCT untuk menghindari duplikasi
+      // Tambahkan WHERE clause untuk filter role='user'
       const [users] = await pool.query(`
         SELECT DISTINCT
           u.id,
@@ -18,6 +18,7 @@ const adminController = {
           END as has_profile
         FROM users u
         LEFT JOIN user_details ud ON u.id = ud.user_id
+        WHERE u.role = 'user'
         ORDER BY u.created_at DESC
       `);
 

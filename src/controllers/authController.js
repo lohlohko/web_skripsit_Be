@@ -1,121 +1,20 @@
-const {
-  validateUser,
-  verifyPassword,
-  hashPassword,
-  getAESKey,
-} = require("../utils/auth");
+const { validateUser, verifyPassword, hashPassword } = require("../utils/auth");
 const pool = require("../config/database");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
-
-exports.login = async (req, res) => {
-  // Validasi method
-  if (req.method !== "POST") {
-    return res.status(405).json({
-      success: false,
-      error: "Method not allowed",
-    });
-  }
-
-  try {
-    // Validasi content type
-    const contentType = req.headers["content-type"];
-    if (!contentType || !contentType.includes("application/json")) {
-      return res.status(400).json({
-        success: false,
-        error: "Content-Type must be application/json",
-      });
-    }
-
-    const { email, password } = req.body;
-    console.log("Login attempt for:", email);
-
-    if (!email || !password) {
-      return res.status(400).json({
-        success: false,
-        error: "Email and password are required",
-      });
-    }
-
-    let connection;
-    try {
-      connection = await pool.getConnection();
-      // Get user by email
-      const [users] = await connection.execute(
-        "SELECT id, name,email, role, hashed_password FROM users WHERE email = ?",
-        [email]
-      );
-
-      if (users.length === 0) {
-        return res.status(401).json({ message: "Invalid email or password" });
-      }
-
-      const user = users[0];
-
-      // Verify password dengan Argon2
-      const isValid = await verifyPassword(password, user.hashed_password);
-
-      if (!isValid) {
-        return res.status(401).json({ message: "Invalid email or password" });
-      }
-
-      console.log("Login successful for user:", {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-      });
-
-      // Buat JWT token
-      const token = jwt.sign(
-        {
-          id: user.id,
-          role: user.role,
-        },
-        process.env.JWT_SECRET,
-        { expiresIn: "24h" }
-      );
-
-      // Set JWT dalam httpOnly cookie
-      res.cookie("jwt", token, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
-        sameSite: "strict",
-        maxAge: 24 * 60 * 60 * 1000, // 24 jam
-      });
-
-      // Kirim response tanpa menyertakan sensitive data
-      return res.json({
-        success: true,
-        message: "Login successful",
-        user: {
-          name: user.name,
-          role: user.role,
-        },
-      });
-    } finally {
-      if (connection) connection.release();
-    }
-  } catch (error) {
-    console.error("Login error:", error);
-    return res.status(400).json({
-      success: false,
-      message: "Login failed",
-      error: error.message || "Invalid credentials",
-    });
-  }
-};
 
 // Tambahkan fungsi register
 exports.register = async (req, res) => {
   let connection;
   try {
-    const { name, email, password } = req.body;
+    // Sesuaikan dengan nama field yang dikirim dari client
+    const { name, email, hashed_password, encrypted_aes_key } = req.body;
 
-    if (!email || !password) {
+    // Validasi input
+    if (!email || !hashed_password || !encrypted_aes_key || !name) {
       return res.status(400).json({
         success: false,
-        message: "Email dan password harus diisi",
+        message: "Email, password, encrypted key, and name are required",
       });
     }
 
@@ -133,12 +32,10 @@ exports.register = async (req, res) => {
       });
     }
 
-    // Ganti ke hashPassword
-    const hashedPassword = await hashPassword(password);
-
-    const [result] = await pool.query(
-      "INSERT INTO users (name, email, hashed_password, role) VALUES (?, ?, ?, ?)",
-      [name, email, hashedPassword, "user"]
+    // Simpan ke database dengan nama field yang sesuai
+    const [result] = await connection.query(
+      "INSERT INTO users (name, email, hashed_password, encrypted_aes_key, role, status) VALUES (?, ?, ?, ?, ?, ?)",
+      [name, email, hashed_password, encrypted_aes_key, "user", "pending"]
     );
 
     return res.status(201).json({
@@ -151,6 +48,84 @@ exports.register = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Terjadi kesalahan saat registrasi",
+      error: error.message, // Tambahkan ini untuk debugging
+    });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+exports.login = async (req, res) => {
+  let connection;
+  try {
+    const { email, hashed_password } = req.body;
+
+    if (!email || !hashed_password) {
+      return res.status(400).json({
+        success: false,
+        error: "Email and password are required",
+      });
+    }
+
+    connection = await pool.getConnection();
+
+    // Get user by email
+    const [users] = await connection.execute(
+      "SELECT id, name, email, role, hashed_password, encrypted_aes_key FROM users WHERE email = ?",
+      [email]
+    );
+
+    if (users.length === 0) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid email or password",
+      });
+    }
+
+    const user = users[0];
+
+    // Verify hashed password
+    if (user.hashed_password !== hashed_password) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid email or password",
+      });
+    }
+
+    // Create JWT token
+    const token = jwt.sign(
+      {
+        id: user.id,
+        role: user.role,
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: "24h" }
+    );
+
+    // Set JWT in httpOnly cookie
+    res.cookie("jwt", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+    });
+
+    // Send response
+    return res.json({
+      success: true,
+      message: "Login successful",
+      user: {
+        name: user.name,
+        role: user.role,
+      },
+      encrypted_aes_key: user.encrypted_aes_key, // Kirim AES key yang terenkripsi
+    });
+  } catch (error) {
+    console.error("Login error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Login failed",
+      error: error.message,
     });
   } finally {
     if (connection) connection.release();
